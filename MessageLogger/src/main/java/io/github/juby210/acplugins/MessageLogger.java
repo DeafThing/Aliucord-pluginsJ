@@ -7,6 +7,7 @@ package io.github.juby210.acplugins;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -20,6 +21,7 @@ import androidx.core.widget.NestedScrollView;
 
 import com.aliucord.*;
 import com.aliucord.annotations.AliucordPlugin;
+import com.aliucord.api.CommandsAPI;
 import com.aliucord.entities.Plugin;
 import com.aliucord.patcher.Hook;
 import com.aliucord.patcher.PreHook;
@@ -43,6 +45,7 @@ import com.discord.widgets.chat.list.entries.MessageEntry;
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel;
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu;
 import com.facebook.drawee.span.DraweeSpanStringBuilder;
+import com.google.android.material.snackbar.Snackbar;
 import com.google.gson.stream.JsonReader;
 
 import java.io.StringReader;
@@ -126,6 +129,24 @@ public final class MessageLogger extends Plugin {
                 logger.error("Couldn't fix reply crash", e);
             }
         }));
+
+        // Register the clearAllLogs command
+        commands.registerCommand(
+            "clearlogs",
+            "Clears all message logs (edits and deletes)",
+            Collections.emptyList(),
+            ctx -> {
+                sqlite.clearEditedMessages();
+                sqlite.clearDeletedMessages();
+                if (chatList != null) {
+                    View view = chatList.getView();
+                    promptRestart(view, "Logs cleared. Restart to apply changes?");
+                } else {
+                    Utils.showToast("Cleared all message logs from the database (restart required)");
+                }
+                return new CommandsAPI.CommandResult();
+            }
+        );
     }
 
     @Override
@@ -290,8 +311,6 @@ public final class MessageLogger extends Plugin {
             for (var id : newDeleted) {
                 var msg = getCachedMessage(channelId, id);
                 if (msg == null) continue;
-                // User author;
-                // if (!selfDelete && (author = msg.getAuthor()) != null && new CoreUser(author).getId() == StoreStream.getUsers().getMe().getId()) selfDelete = true;
                 var channelDeletes = deletedMessagesRecord.computeIfAbsent(channelId, k -> new ArrayList<>());
                 channelDeletes.add(id);
                 var record = messageRecord.computeIfAbsent(id, k -> new MessageRecord());
@@ -437,7 +456,7 @@ public final class MessageLogger extends Plugin {
         }
     }
 
-    // cache
+    // Cache utilities
     private Message getCachedMessage(long channelId, long id) {
         return cachedMessages.containsKey(id) ? cachedMessages.get(id) : StoreStream.getMessages().getMessage(channelId, id);
     }
@@ -446,7 +465,7 @@ public final class MessageLogger extends Plugin {
         cachedMessages.put(id, message);
     }
 
-    // some display utils
+    // Display utilities
     private void markDeleted(SpannableStringBuilder builder, int start, int end) {
         if (start != end) builder.setSpan(new ForegroundColorSpan(0xfff04747), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
@@ -462,5 +481,36 @@ public final class MessageLogger extends Plugin {
     private void setEditedColor(Context context, SpannableStringBuilder builder, int start, int end) {
         if (start != end) builder.setSpan(EditedMessageNode.Companion.access$getForegroundColorSpan(EditedMessageNode.Companion, context),
             start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    /**
+     * Shows a Snackbar with a restart option
+     * @param view The view to attach the Snackbar to
+     * @param message The message to display in the Snackbar
+     */
+    private void promptRestart(View view, String message) {
+        Snackbar.make(view, message, Snackbar.LENGTH_INDEFINITE)
+            .setAction("Restart", v -> {
+                Context context = v.getContext();
+                try {
+                    // Get the launch intent for the current package
+                    Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+                    if (launchIntent != null) {
+                        // Create a restart intent using the launch intent's component
+                        Intent restartIntent = Intent.makeRestartActivityTask(launchIntent.getComponent());
+                        // Start the restart intent
+                        context.startActivity(restartIntent);
+                        // Terminate the current process
+                        Runtime.getRuntime().exit(0);
+                    } else {
+                        // Handle case where launch intent is null
+                        Utils.showToast("Failed to restart the app");
+                    }
+                } catch (Exception e) {
+                    // Handle any errors during the restart process
+                    Utils.showToast("Error restarting: " + e.getMessage());
+                    logger.error("Failed to restart app", e);
+                }
+            }).show();
     }
 }

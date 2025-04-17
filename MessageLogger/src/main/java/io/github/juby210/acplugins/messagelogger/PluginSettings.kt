@@ -215,6 +215,27 @@ class PluginSettings : BottomSheet() {
                 }.show(parentFragmentManager, "ClearDeletedMessages")
             }
         })
+        
+        // Add this button after the existing clear delete logs button
+        addView(DangerButton(context).apply {
+            text = "Clear All Logs (Requires Restart)"
+            setOnClickListener {
+                val confirmDelete = ConfirmDialog()
+                    .setTitle("Clear All Message Logs?")
+                    .setIsDangerous(true)
+                    .setDescription("Are you sure you want to clear ALL edited and deleted messages from the logs?")
+                confirmDelete.setOnOkListener {
+                    with(SQLite(context)) {
+                        clearEditedMessages()
+                        clearDeletedMessages()
+                        close()
+                    }
+                    showToast("Cleared all message logs from the database (restart required)")
+                    confirmDelete.dismiss()
+                    dismiss()
+                }.show(parentFragmentManager, "ClearAllLogs")
+            }
+        })
 
         addView(DangerButton(context).apply {
             text = "Clear Server " + (if (isWhitelist) "Whitelist" else "Blacklist") + " (Requires Restart)"

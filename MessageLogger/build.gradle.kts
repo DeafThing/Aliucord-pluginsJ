@@ -1,7 +1,17 @@
-version = "1.1.5"
+version = "1.1.7"
 description = "Saves deleted / edited messages to a SQLite database and restores them when the channel is opened."
-
 aliucord.changelog.set("""
+    1.1.7
+    ======================
+
+    * added /clearlogs to clear logs faster
+    * restart snackbar added for faster resetting when using the command
+
+    1.1.6
+    ======================
+
+    * added a delete both logs button
+
     1.1.5
     ======================
 
