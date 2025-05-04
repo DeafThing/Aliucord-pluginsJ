@@ -7,7 +7,6 @@ package io.github.juby210.acplugins;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.Intent;
 import android.database.Cursor;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -45,14 +44,12 @@ import com.discord.widgets.chat.list.entries.MessageEntry;
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel;
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu;
 import com.facebook.drawee.span.DraweeSpanStringBuilder;
-import com.google.android.material.snackbar.Snackbar;
 import com.google.gson.stream.JsonReader;
 
 import java.io.StringReader;
 import java.util.*;
 
 import io.github.juby210.acplugins.messagelogger.*;
-import kotlin.jvm.functions.Function1;
 
 @AliucordPlugin
 @SuppressLint("UseCompatLoadingForDrawables")
@@ -130,7 +127,7 @@ public final class MessageLogger extends Plugin {
             }
         }));
 
-        // Register the clearAllLogs command
+        // Register the clearAllLogs command with RestartUtils
         commands.registerCommand(
             "clearlogs",
             "Clears all message logs (edits and deletes)",
@@ -140,7 +137,12 @@ public final class MessageLogger extends Plugin {
                 sqlite.clearDeletedMessages();
                 if (chatList != null) {
                     View view = chatList.getView();
-                    promptRestart(view, "Logs cleared. Restart to apply changes?");
+                    if (view != null) {
+                        Context viewContext = view.getContext();
+                        RestartUtils.promptRestart(viewContext, "Logs cleared. Restart to apply changes?");
+                    } else {
+                        Utils.showToast("Cleared all message logs from the database (restart required)");
+                    }
                 } else {
                     Utils.showToast("Cleared all message logs from the database (restart required)");
                 }
@@ -376,7 +378,7 @@ public final class MessageLogger extends Plugin {
         var getSpoilerClickHandler = c.getDeclaredMethod("getSpoilerClickHandler", Message.class);
         getSpoilerClickHandler.setAccessible(true);
         var getMessageRenderContext = c.getDeclaredMethod("getMessageRenderContext",
-            Context.class, MessageEntry.class, Function1.class);
+            Context.class, MessageEntry.class, kotlin.jvm.functions.Function1.class);
         getMessageRenderContext.setAccessible(true);
         var mDraweeStringBuilder = SimpleDraweeSpanTextView.class.getDeclaredField("mDraweeStringBuilder");
         mDraweeStringBuilder.setAccessible(true);
@@ -456,7 +458,7 @@ public final class MessageLogger extends Plugin {
         }
     }
 
-    // Cache utilities
+    // cache
     private Message getCachedMessage(long channelId, long id) {
         return cachedMessages.containsKey(id) ? cachedMessages.get(id) : StoreStream.getMessages().getMessage(channelId, id);
     }
@@ -465,7 +467,7 @@ public final class MessageLogger extends Plugin {
         cachedMessages.put(id, message);
     }
 
-    // Display utilities
+    // some display utils
     private void markDeleted(SpannableStringBuilder builder, int start, int end) {
         if (start != end) builder.setSpan(new ForegroundColorSpan(0xfff04747), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
@@ -481,36 +483,5 @@ public final class MessageLogger extends Plugin {
     private void setEditedColor(Context context, SpannableStringBuilder builder, int start, int end) {
         if (start != end) builder.setSpan(EditedMessageNode.Companion.access$getForegroundColorSpan(EditedMessageNode.Companion, context),
             start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-    }
-
-    /**
-     * Shows a Snackbar with a restart option
-     * @param view The view to attach the Snackbar to
-     * @param message The message to display in the Snackbar
-     */
-    private void promptRestart(View view, String message) {
-        Snackbar.make(view, message, Snackbar.LENGTH_INDEFINITE)
-            .setAction("Restart", v -> {
-                Context context = v.getContext();
-                try {
-                    // Get the launch intent for the current package
-                    Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-                    if (launchIntent != null) {
-                        // Create a restart intent using the launch intent's component
-                        Intent restartIntent = Intent.makeRestartActivityTask(launchIntent.getComponent());
-                        // Start the restart intent
-                        context.startActivity(restartIntent);
-                        // Terminate the current process
-                        Runtime.getRuntime().exit(0);
-                    } else {
-                        // Handle case where launch intent is null
-                        Utils.showToast("Failed to restart the app");
-                    }
-                } catch (Exception e) {
-                    // Handle any errors during the restart process
-                    Utils.showToast("Error restarting: " + e.getMessage());
-                    logger.error("Failed to restart app", e);
-                }
-            }).show();
     }
 }
