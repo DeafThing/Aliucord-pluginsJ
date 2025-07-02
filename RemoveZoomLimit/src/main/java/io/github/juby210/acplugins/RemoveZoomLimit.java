@@ -32,6 +32,8 @@ import java.util.regex.Pattern;
 @AliucordPlugin
 @SuppressWarnings("unused")
 public final class RemoveZoomLimit extends Plugin {
+    private static final long MAX_CANVAS_PIXELS = 100_000_000L;
+    
     public RemoveZoomLimit() {
         settingsTab = new SettingsTab(PluginSettings.class, SettingsTab.Type.BOTTOM_SHEET).withArgs(this);
     }
@@ -52,7 +54,7 @@ public final class RemoveZoomLimit extends Plugin {
             var layout = new LinearLayout(context);
             layout.setBackgroundColor(ColorCompat.getThemedColor(context, R.b.colorBackgroundPrimary));
 
-            var cs = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, "Disable max resolution limit", "Warning: It can cause crashes on some devices");
+            var cs = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, "Disable max resolution limit", "Warning: It can cause crashes on some devices with very large images");
             cs.setChecked(plugin.settings.getBool("removeMaxRes", false));
             cs.setOnCheckedListener(c -> {
                 plugin.settings.setBool("removeMaxRes", c);
@@ -66,18 +68,58 @@ public final class RemoveZoomLimit extends Plugin {
 
     @Override
     public void start(Context context) throws Throwable {
-        // remove limited width and height from the url
         var pattern = Pattern.compile("width=\\d+&height=\\d+");
         patcher.patch(WidgetMedia.class, "getFormattedUrl", new Class<?>[]{ Context.class, Uri.class }, new Hook(param -> {
             var res = (String) param.getResult();
-            if (res.contains(".discordapp.net/")) param.setResult(pattern.matcher(res).replaceFirst(""));
+            if (res.contains(".discordapp.net/")) {
+                String newUrl = pattern.matcher(res).replaceFirst("");
+                if (!settings.getBool("removeMaxRes", false)) {
+                    if (newUrl.contains("?")) {
+                        newUrl += "&width=8192&height=8192";
+                    } else {
+                        newUrl += "?width=8192&height=8192";
+                    }
+                }
+                
+                param.setResult(newUrl);
+            }
         }));
-
-        // com.facebook.samples.zoomable.DefaultZoomableController limitScale
-        // https://github.com/facebook/fresco/blob/master/samples/zoomable/src/main/java/com/facebook/samples/zoomable/DefaultZoomableController.java#L474-L495
-        patcher.patch(b.f.l.b.c.class.getDeclaredMethod("f", Matrix.class, float.class, float.class, int.class), InsteadHook.returnConstant(false));
-
+        patchZoomController();
+        
         removeMaxRes();
+    }
+
+    private void patchZoomController() throws Throwable {
+        var zoomControllerClass = b.f.l.b.c.class;
+        var limitScaleMethod = zoomControllerClass.getDeclaredMethod("f", Matrix.class, float.class, float.class, int.class);
+        
+        patcher.patch(limitScaleMethod, new InsteadHook(param -> {
+            Matrix matrix = (Matrix) param.args[0];
+            float scale = (Float) param.args[1];
+            float focusX = (Float) param.args[2];
+            float focusY = (Float) param.args[3];
+            float[] values = new float[9];
+            matrix.getValues(values);
+            float currentScaleX = values[Matrix.MSCALE_X];
+            float currentScaleY = values[Matrix.MSCALE_Y];
+            float newScaleX = currentScaleX * scale;
+            float newScaleY = currentScaleY * scale;
+            float baseWidth = 2048f;
+            float baseHeight = 2048f;
+            try {
+                long estimatedCanvasSize = (long)(baseWidth * Math.abs(newScaleX) * baseHeight * Math.abs(newScaleY) * 4);
+                if (estimatedCanvasSize > 150_000_000L) {
+                    logger.debug("Preventing zoom that would exceed canvas size limit");
+                    return true;
+                }
+            } catch (Exception e) {
+                if (Math.abs(newScaleX) > 10f || Math.abs(newScaleY) > 10f) {
+                    return true;
+                }
+            }
+            
+            return false;
+        }));
     }
 
     @Override
@@ -89,16 +131,17 @@ public final class RemoveZoomLimit extends Plugin {
 
     public void removeMaxRes() {
         if (settings.getBool("removeMaxRes", false)) {
-            // Remove max resolution limit in image loader
-            // Gets method by param types because the method is in heavily obfuscated class
             var f = b.f.j.d.f.class;
             var e = b.f.j.d.e.class;
             var i = int.class;
+            
             for (var m : b.c.a.a0.d.class.getDeclaredMethods()) {
                 var params = m.getParameterTypes();
                 if (params.length == 4 && params[0] == f && params[1] == e && params[3] == i) {
                     logger.debug("Found obfuscated method to limit resolution: " + m.getName());
-                    maxResUnpatch = patcher.patch(m, InsteadHook.returnConstant(1));
+                    maxResUnpatch = patcher.patch(m, new InsteadHook(param -> {
+                        return 4;
+                    }));
                     break;
                 }
             }
