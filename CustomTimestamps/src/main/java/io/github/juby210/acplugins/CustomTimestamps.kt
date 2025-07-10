@@ -32,6 +32,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.lang.ref.WeakReference
+import androidx.recyclerview.widget.RecyclerView
 
 @AliucordPlugin
 @Suppress("unused")
@@ -45,7 +50,7 @@ class CustomTimestamps : Plugin() {
         override fun onViewBound(view: View) {
             super.onViewBound(view)
 
-            setActionBarTitle("CustomTimestamps")
+            setActionBarTitle("Custom Timestamps")
             setPadding(0)
 
             val context = view.context
@@ -201,6 +206,33 @@ class CustomTimestamps : Plugin() {
             }
             linearLayout.addView(relativeTimeSwitch)
 
+            // Real-time update toggle
+            val realTimeUpdateSwitch = Utils.createCheckedSetting(
+                context,
+                CheckedSetting.ViewType.SWITCH,
+                "Real-time timestamp updates",
+                "Automatically update relative timestamps (e.g., '5m ago' → '6m ago')"
+            ).apply {
+                isChecked = settings.getBool("realTimeUpdates", true)
+                val layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                layoutParams.setMargins(padding, 0, padding, halfPadding)
+                this.layoutParams = layoutParams
+                visibility = if (useRelativeTime) View.VISIBLE else View.GONE
+            }
+            linearLayout.addView(realTimeUpdateSwitch)
+
+            realTimeUpdateSwitch.setOnCheckedListener { isChecked ->
+                settings.setBool("realTimeUpdates", isChecked)
+                if (isChecked) {
+                    startTimestampUpdater()
+                } else {
+                    stopTimestampUpdater()
+                }
+            }
+
             // Threshold input container
             val thresholdContainer = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -266,6 +298,13 @@ class CustomTimestamps : Plugin() {
             relativeTimeSwitch.setOnCheckedListener { isChecked ->
                 settings.setBool("useRelativeTime", isChecked)
                 thresholdContainer.visibility = if (isChecked) View.VISIBLE else View.GONE
+                realTimeUpdateSwitch.visibility = if (isChecked) View.VISIBLE else View.GONE
+                
+                if (isChecked && settings.getBool("realTimeUpdates", true)) {
+                    startTimestampUpdater()
+                } else {
+                    stopTimestampUpdater()
+                }
             }
         }
 
@@ -302,22 +341,22 @@ class CustomTimestamps : Plugin() {
         private fun setPreview(formatStr: String, view: TextView) {
             val currentTime = System.currentTimeMillis()
             val formattedTime = format(formatStr, currentTime)
-
+            
             view.text = SpannableStringBuilder().apply {
                 append("Preview: ")
                 val start = length
                 append(formattedTime)
                 val end = length
-
+                
                 // Make the formatted time bold
                 setSpan(StyleSpan(android.graphics.Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-
+                
                 append("\n\nFor more formatting options, see the ")
                 val linkStart = length
                 append("Java SimpleDateFormat documentation")
                 val linkEnd = length
-
-                setSpan(URLSpan("https://docs.oracle.com/javase/7/docs/api/java/text/SimpleDateFormat.html"),
+                
+                setSpan(URLSpan("https://docs.oracle.com/javase/7/docs/api/java/text/SimpleDateFormat.html"), 
                        linkStart, linkEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
@@ -330,13 +369,18 @@ class CustomTimestamps : Plugin() {
     override fun start(context: Context?) {
         // Initialize settings reference
         pluginSettings = settings
-
+        
+        // Start the timestamp updater if enabled
+        if (settings.getBool("useRelativeTime", true) && settings.getBool("realTimeUpdates", true)) {
+            startTimestampUpdater()
+        }
+        
         patcher.patch(
             TimeUtils::class.java.getDeclaredMethod("toReadableTimeString", Context::class.java, Long::class.javaPrimitiveType, Clock::class.java),
-            Hook {
+            Hook { 
                 val timestamp = it.args[1] as Long
                 val ctx = it.args[0] as Context
-
+                
                 it.result = if (settings.getBool("useRelativeTime", true)) {
                     formatWithRelativeTime(ctx, timestamp)
                 } else {
@@ -346,21 +390,85 @@ class CustomTimestamps : Plugin() {
         )
     }
 
-    override fun stop(context: Context?) = patcher.unpatchAll()
+    override fun stop(context: Context?) {
+        stopTimestampUpdater()
+        patcher.unpatchAll()
+    }
 
     companion object {
         const val defaultFormat = "dd.MM.yyyy, HH:mm:ss"
-
+        
         // Thread-safe cache for SimpleDateFormat instances
         private val formatCache = ConcurrentHashMap<String, SimpleDateFormat>()
-
+        
         // Cache for relative time calculations to avoid repeated calculations
         private val relativeTimeCache = ConcurrentHashMap<Long, String>()
         private var lastCacheClear = System.currentTimeMillis()
-
+        
         // Reference to plugin settings
         private lateinit var pluginSettings: SettingsAPI
-
+        
+        // Real-time update system
+        private var timestampUpdater: ScheduledExecutorService? = null
+        private var updateTask: ScheduledFuture<*>? = null
+        private val activeRecyclerViews = mutableSetOf<WeakReference<RecyclerView>>()
+        
+        fun startTimestampUpdater() {
+            // Don't start if already running
+            if (timestampUpdater != null && !timestampUpdater!!.isShutdown) return
+            
+            timestampUpdater = Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "TimestampUpdater").apply {
+                    isDaemon = true
+                }
+            }
+            
+            updateTask = timestampUpdater?.scheduleWithFixedDelay({
+                try {
+                    updateVisibleTimestamps()
+                } catch (e: Exception) {
+                    Main.logger.error("Error updating timestamps", e)
+                }
+            }, 60, 60, TimeUnit.SECONDS) // Update every minute
+        }
+        
+        fun stopTimestampUpdater() {
+            updateTask?.cancel(true)
+            updateTask = null
+            
+            timestampUpdater?.shutdown()
+            timestampUpdater = null
+            
+            // Clear the recycler view references
+            activeRecyclerViews.clear()
+        }
+        
+        private fun updateVisibleTimestamps() {
+            // Clear expired weak references
+            activeRecyclerViews.removeIf { it.get() == null }
+            
+            // Update visible items in active RecyclerViews
+            activeRecyclerViews.forEach { ref ->
+                ref.get()?.let { recyclerView ->
+                    try {
+                        recyclerView.post {
+                            // Clear the cache to force recalculation
+                            relativeTimeCache.clear()
+                            
+                            // Notify adapter of potential changes
+                            recyclerView.adapter?.notifyDataSetChanged()
+                        }
+                    } catch (e: Exception) {
+                        Main.logger.error("Error updating RecyclerView", e)
+                    }
+                }
+            }
+        }
+        
+        fun registerRecyclerView(recyclerView: RecyclerView) {
+            activeRecyclerViews.add(WeakReference(recyclerView))
+        }
+        
         fun format(format: String?, time: Long): String {
             val formatStr = format ?: defaultFormat
             return try {
@@ -381,29 +489,32 @@ class CustomTimestamps : Plugin() {
                 }
             }
         }
-
+        
         private fun formatWithRelativeTime(context: Context, timestamp: Long): String {
             val now = System.currentTimeMillis()
             val diff = now - timestamp
-
+            
             // Clear cache periodically to prevent memory leaks
             if (now - lastCacheClear > TimeUnit.HOURS.toMillis(1)) {
                 relativeTimeCache.clear()
                 lastCacheClear = now
             }
-
+            
             // Get threshold from settings (default 24 hours)
             val thresholdHours = pluginSettings.getInt("relativeTimeThreshold", 24)
             val thresholdMillis = TimeUnit.HOURS.toMillis(thresholdHours.toLong())
-
+            
             return if (diff < thresholdMillis && diff >= 0) {
-                // Use cached relative time if available and still valid (within 1 minute)
-                relativeTimeCache[timestamp]?.takeIf {
-                    System.currentTimeMillis() - timestamp < TimeUnit.MINUTES.toMillis(1)
-                } ?: run {
-                    val relativeTime = formatRelativeTime(diff)
-                    relativeTimeCache[timestamp] = relativeTime
-                    relativeTime
+                // For real-time updates, don't cache very recent messages
+                if (pluginSettings.getBool("realTimeUpdates", true) && diff < TimeUnit.HOURS.toMillis(1)) {
+                    formatRelativeTime(diff)
+                } else {
+                    // Use cached relative time if available and still valid
+                    relativeTimeCache[timestamp] ?: run {
+                        val relativeTime = formatRelativeTime(diff)
+                        relativeTimeCache[timestamp] = relativeTime
+                        relativeTime
+                    }
                 }
             } else {
                 // Use custom format for older messages
@@ -411,13 +522,13 @@ class CustomTimestamps : Plugin() {
                 format(customFormat, timestamp)
             }
         }
-
+        
         private fun formatRelativeTime(diffMillis: Long): String {
             val seconds = diffMillis / 1000
             val minutes = seconds / 60
             val hours = minutes / 60
             val days = hours / 24
-
+            
             return when {
                 seconds < 60 -> "Just now"
                 minutes < 60 -> "${minutes}m ago"
